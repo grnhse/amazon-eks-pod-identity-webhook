@@ -25,6 +25,14 @@ func NewFakeServiceAccountCache(accounts ...*v1.ServiceAccount) *FakeServiceAcco
 		if !ok {
 			audience = "sts.amazonaws.com"
 		}
+
+		var fsGroup *int64
+		if fsgStr, ok := sa.Annotations["eks.amazonaws.com/fs-group"]; ok {
+			if fsgInt, err := strconv.ParseInt(fsgStr, 10, 64); err == nil {
+				fsGroup = &fsgInt
+			}
+		}
+
 		regionalSTSstr, _ := sa.Annotations["eks.amazonaws.com/sts-regional-endpoints"]
 		regionalSTS, _ := strconv.ParseBool(regionalSTSstr)
 		tokenExpirationStr, _ := sa.Annotations["eks.amazonaws.com/token-expiration"]
@@ -33,7 +41,7 @@ func NewFakeServiceAccountCache(accounts ...*v1.ServiceAccount) *FakeServiceAcco
 			tokenExpiration = pkg.DefaultTokenExpiration // Otherwise default would be 0
 		}
 
-		c.Add(sa.Name, sa.Namespace, arn, audience, regionalSTS, tokenExpiration)
+		c.Add(sa.Name, sa.Namespace, arn, audience, fsGroup, regionalSTS, tokenExpiration)
 	}
 	return c
 }
@@ -44,23 +52,29 @@ var _ ServiceAccountCache = &FakeServiceAccountCache{}
 func (f *FakeServiceAccountCache) Start() {}
 
 // Get gets a service account from the cache
-func (f *FakeServiceAccountCache) Get(name, namespace string) (role, aud string, useRegionalSTS bool, tokenExpiration int64) {
+func (f *FakeServiceAccountCache) Get(name, namespace string) (role, aud string, fsGroup *int64, useRegionalSTS bool, tokenExpiration int64) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	resp, ok := f.cache[namespace+"/"+name]
 	if !ok {
-		return "", "", false, pkg.DefaultTokenExpiration
+		return "", "", nil, false, pkg.DefaultTokenExpiration
 	}
-	return resp.RoleARN, resp.Audience, resp.UseRegionalSTS, resp.TokenExpiration
+	// Immutable safety for the fsGroup *int64 in the cache
+	if resp.FSGroup != nil {
+		fsGroup = new(int64)
+		*fsGroup = *resp.FSGroup
+	}
+	return resp.RoleARN, resp.Audience, fsGroup, resp.UseRegionalSTS, resp.TokenExpiration
 }
 
 // Add adds a cache entry
-func (f *FakeServiceAccountCache) Add(name, namespace, role, aud string, regionalSTS bool, tokenExpiration int64) {
+func (f *FakeServiceAccountCache) Add(name, namespace, role, aud string, fsGroup *int64, regionalSTS bool, tokenExpiration int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cache[namespace+"/"+name] = &CacheResponse{
 		RoleARN:         role,
 		Audience:        aud,
+		FSGroup:         fsGroup,
 		UseRegionalSTS:  regionalSTS,
 		TokenExpiration: tokenExpiration,
 	}

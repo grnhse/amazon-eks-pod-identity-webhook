@@ -228,3 +228,167 @@ func TestModifierHandler(t *testing.T) {
 		})
 	}
 }
+
+var rawPodWithoutFSGroup = []byte(`
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+	"name": "balajilovesoreos",
+	"uid": "be8695c4-4ad0-4038-8786-c508853aa255"
+  },
+  "spec": {
+	"containers": [
+	  {
+		"image": "amazonlinux",
+		"name": "balajilovesoreos"
+	  }
+	],
+	"serviceAccountName": "fsgroup"
+  }
+}
+`)
+
+var rawPodWithFSGroup = []byte(`
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+	"name": "balajilovesoreos",
+	"uid": "be8695c4-4ad0-4038-8786-c508853aa255"
+  },
+  "spec": {
+	"containers": [
+	  {
+		"image": "amazonlinux",
+		"name": "balajilovesoreos"
+	  }
+	],
+    "securityContext": {
+      "fsGroup": 54321
+    },
+	"serviceAccountName": "fsgroup"
+  }
+}
+`)
+
+var rawPodWithFSGroupAnnotation = []byte(`
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "annotations": {
+      "eks.amazonaws.com/fs-group": "33333"
+    },
+	"name": "balajilovesoreos",
+	"uid": "be8695c4-4ad0-4038-8786-c508853aa255"
+  },
+  "spec": {
+	"containers": [
+	  {
+		"image": "amazonlinux",
+		"name": "balajilovesoreos"
+	  }
+	],
+    "securityContext": {
+      "runAsUser": 2000
+    },
+	"serviceAccountName": "fsgroup"
+  }
+}
+`)
+
+var validPatchIfNoFSGroupPresent = []byte(`[{"op":"add","path":"/spec/volumes","value":[{"name":"aws-iam-token","projected":{"sources":[{"serviceAccountToken":{"audience":"sts.amazonaws.com","expirationSeconds":86400,"path":"token"}}]}}]},{"op":"add","path":"/spec/containers","value":[{"name":"balajilovesoreos","image":"amazonlinux","env":[{"name":"AWS_ROLE_ARN","value":"arn:aws:iam::111122223333:role/s3-reader"},{"name":"AWS_WEB_IDENTITY_TOKEN_FILE","value":"/var/run/secrets/eks.amazonaws.com/serviceaccount/token"}],"resources":{},"volumeMounts":[{"name":"aws-iam-token","readOnly":true,"mountPath":"/var/run/secrets/eks.amazonaws.com/serviceaccount"}]}]},{"op":"add","path":"/spec/securityContext","value":{"fsGroup":12345}}]`)
+var validPatchIfFSGroupPresent = []byte(`[{"op":"add","path":"/spec/volumes","value":[{"name":"aws-iam-token","projected":{"sources":[{"serviceAccountToken":{"audience":"sts.amazonaws.com","expirationSeconds":86400,"path":"token"}}]}}]},{"op":"add","path":"/spec/containers","value":[{"name":"balajilovesoreos","image":"amazonlinux","env":[{"name":"AWS_ROLE_ARN","value":"arn:aws:iam::111122223333:role/s3-reader"},{"name":"AWS_WEB_IDENTITY_TOKEN_FILE","value":"/var/run/secrets/eks.amazonaws.com/serviceaccount/token"}],"resources":{},"volumeMounts":[{"name":"aws-iam-token","readOnly":true,"mountPath":"/var/run/secrets/eks.amazonaws.com/serviceaccount"}]}]}]`)
+var validPatchIfFSGroupAnnotationPresent = []byte(`[{"op":"add","path":"/spec/volumes","value":[{"name":"aws-iam-token","projected":{"sources":[{"serviceAccountToken":{"audience":"sts.amazonaws.com","expirationSeconds":86400,"path":"token"}}]}}]},{"op":"add","path":"/spec/containers","value":[{"name":"balajilovesoreos","image":"amazonlinux","env":[{"name":"AWS_ROLE_ARN","value":"arn:aws:iam::111122223333:role/s3-reader"},{"name":"AWS_WEB_IDENTITY_TOKEN_FILE","value":"/var/run/secrets/eks.amazonaws.com/serviceaccount/token"}],"resources":{},"volumeMounts":[{"name":"aws-iam-token","readOnly":true,"mountPath":"/var/run/secrets/eks.amazonaws.com/serviceaccount"}]}]},{"op":"add","path":"/spec/securityContext","value":{"runAsUser":2000,"fsGroup":33333}}]`)
+
+var validResponseIfNoFSGroupPresent = &v1beta1.AdmissionResponse{
+	UID:       "918ef1dc-928f-4525-99ef-988389f263c3",
+	Allowed:   true,
+	Patch:     validPatchIfNoFSGroupPresent,
+	PatchType: &jsonPatchType,
+}
+
+var validResponseIfFSGroupPresent = &v1beta1.AdmissionResponse{
+	UID:       "918ef1dc-928f-4525-99ef-988389f263c3",
+	Allowed:   true,
+	Patch:     validPatchIfFSGroupPresent,
+	PatchType: &jsonPatchType,
+}
+
+var validResponseIfFSGroupAnnotationPresent = &v1beta1.AdmissionResponse{
+	UID:       "918ef1dc-928f-4525-99ef-988389f263c3",
+	Allowed:   true,
+	Patch:     validPatchIfFSGroupAnnotationPresent,
+	PatchType: &jsonPatchType,
+}
+
+func TestFSGroupUpdate(t *testing.T) {
+	testServiceAccount := &v1.ServiceAccount{}
+	testServiceAccount.Name = "fsgroup"
+	testServiceAccount.Namespace = "default"
+	testServiceAccount.Annotations = map[string]string{
+		"eks.amazonaws.com/role-arn": "arn:aws:iam::111122223333:role/s3-reader",
+		"eks.amazonaws.com/fs-group": "12345",
+	}
+
+	modifier := NewModifier(WithServiceAccountCache(cache.NewFakeServiceAccountCache(testServiceAccount)))
+
+	ts := httptest.NewServer(
+		http.HandlerFunc(modifier.Handle),
+	)
+	defer ts.Close()
+
+	cases := []struct {
+		caseName         string
+		input            []byte
+		inputContentType string
+		want             []byte
+	}{
+		{
+			"ValidRequestSuccessWithoutFSGroup",
+			serializeAdmissionReview(t, getValidReview(rawPodWithoutFSGroup)),
+			"application/json",
+			serializeAdmissionReview(t, &v1beta1.AdmissionReview{Response: validResponseIfNoFSGroupPresent}),
+		},
+		{
+			"ValidRequestSuccessWithFSGroup",
+			serializeAdmissionReview(t, getValidReview(rawPodWithFSGroup)),
+			"application/json",
+			serializeAdmissionReview(t, &v1beta1.AdmissionReview{Response: validResponseIfFSGroupPresent}),
+		},
+		{
+			"ValidRequestSuccessWithFSGroupAnnotation",
+			serializeAdmissionReview(t, getValidReview(rawPodWithFSGroupAnnotation)),
+			"application/json",
+			serializeAdmissionReview(t, &v1beta1.AdmissionReview{Response: validResponseIfFSGroupAnnotationPresent}),
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.caseName, func(t *testing.T) {
+			var buf io.Reader
+			if c.input != nil {
+				buf = bytes.NewBuffer(c.input)
+			}
+			resp, err := http.Post(ts.URL, c.inputContentType, buf)
+			if err != nil {
+				t.Errorf("Failed to make request: %v", err)
+				return
+			}
+			responseBytes, err := ioutil.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				t.Errorf("Failed to read response: %v", err)
+				return
+			}
+
+			if bytes.Compare(responseBytes, c.want) != 0 {
+				t.Errorf("Expected response didn't match: \nGot\n\t\"%v\"\nWanted:\n\t\"%v\"\n",
+					string(responseBytes),
+					string(c.want),
+				)
+			}
+		})
+	}
+}
