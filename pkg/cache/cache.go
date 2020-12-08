@@ -35,13 +35,14 @@ import (
 type CacheResponse struct {
 	RoleARN         string
 	Audience        string
+	FSGroup         *int64
 	UseRegionalSTS  bool
 	TokenExpiration int64
 }
 
 type ServiceAccountCache interface {
 	Start()
-	Get(name, namespace string) (role, aud string, useRegionalSTS bool, tokenExpiration int64)
+	Get(name, namespace string) (role, aud string, fsGroup *int64, useRegionalSTS bool, tokenExpiration int64)
 	// ToJSON returns cache contents as JSON string
 	ToJSON() string
 }
@@ -58,14 +59,19 @@ type serviceAccountCache struct {
 	defaultTokenExpiration int64
 }
 
-func (c *serviceAccountCache) Get(name, namespace string) (role, aud string, useRegionalSTS bool, tokenExpiration int64) {
+func (c *serviceAccountCache) Get(name, namespace string) (role, aud string, fsGroup *int64, useRegionalSTS bool, tokenExpiration int64) {
 	klog.V(5).Infof("Fetching sa %s/%s from cache", namespace, name)
 	resp := c.get(name, namespace)
 	if resp == nil {
 		klog.V(4).Infof("Service account %s/%s not found in cache", namespace, name)
-		return "", "", false, pkg.DefaultTokenExpiration
+		return "", "", nil, false, pkg.DefaultTokenExpiration
 	}
-	return resp.RoleARN, resp.Audience, resp.UseRegionalSTS, resp.TokenExpiration
+	// Immutable safety for the fsGroup *int64 in the cache
+	if resp.FSGroup != nil {
+		fsGroup = new(int64)
+		*fsGroup = *resp.FSGroup
+	}
+	return resp.RoleARN, resp.Audience, fsGroup, resp.UseRegionalSTS, resp.TokenExpiration
 }
 
 func (c *serviceAccountCache) get(name, namespace string) *CacheResponse {
@@ -123,6 +129,15 @@ func (c *serviceAccountCache) addSA(sa *v1.ServiceAccount) {
 				klog.V(4).Infof("Found invalid value for token expiration, using %d seconds as default: %v", resp.TokenExpiration, err)
 			} else {
 				resp.TokenExpiration = pkg.ValidateMinTokenExpiration(tokenExpiration)
+			}
+		}
+
+		if fsgStr, ok := sa.Annotations[c.annotationPrefix+"/"+pkg.FSGroupAnnotation]; ok {
+			fsgInt, err := strconv.ParseInt(fsgStr, 10, 64)
+			if err != nil {
+				klog.V(4).Infof("Ignoring service account %s/%s invalid value for fs-group annotation", sa.Namespace, sa.Name)
+			} else {
+				resp.FSGroup = &fsgInt
 			}
 		}
 	}

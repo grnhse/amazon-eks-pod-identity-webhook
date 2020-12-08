@@ -26,4 +26,7 @@ const (
 
 	// A comma-separated list of container names to skip adding environment variables and volumes to. Applies to `initContainers` and `containers`
 	SkipContainersAnnotation = "skip-containers"
+
+	// FSGroup Annotation
+	FSGroupAnnotation = "fs-group"
 )

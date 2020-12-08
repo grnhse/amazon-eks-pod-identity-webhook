@@ -259,7 +259,46 @@ func (m *Modifier) addEnvToContainer(container *corev1.Container, tokenFilePath,
 	return changed
 }
 
-func (m *Modifier) updatePodSpec(pod *corev1.Pod, roleName, audience string, regionalSTS bool, tokenExpiration int64) ([]patchOperation, bool) {
+// addFSGroupToPod adds an `fsGroup` to the PodSecurityContext and returns the
+// `corev1.PodSecurityContext` to use in a patch OR nil if no patch is needed.
+func (m *Modifier) addFSGroupToPod(pod *corev1.Pod, saFSGroup *int64) *corev1.PodSecurityContext {
+	fsGroup := saFSGroup
+
+	// Any `fs-group` annotations on a pod takes precedence over a
+	// ServiceAccount `fs-group` annotation
+	fsGroupKey := fmt.Sprintf("%s/%s", m.AnnotationDomain, pkg.FSGroupAnnotation)
+	if fsgStr, ok := pod.Annotations[fsGroupKey]; ok {
+		fsgInt, err := strconv.ParseInt(fsgStr, 10, 64)
+		if err != nil {
+			klog.V(4).Infof("Ignoring pod %s/%s invalid value for fs-group annotation", pod.Namespace, pod.Name)
+		} else {
+			fsGroup = &fsgInt
+		}
+	}
+
+	// Don't patch if an fsGroup isn't set via an annotation
+	if fsGroup == nil {
+		return nil
+	}
+
+	// If a PodSecurityContext exists, only add fsGroup if one isn't set.
+	sc := pod.Spec.SecurityContext
+	if sc != nil {
+		if sc.FSGroup == nil {
+			sc.FSGroup = fsGroup
+			return sc
+		}
+		return nil
+	}
+
+	// Otherwise, add a new PodSecurityContext with our fsGroup.
+	pod.Spec.SecurityContext = &corev1.PodSecurityContext{
+		FSGroup: fsGroup,
+	}
+	return pod.Spec.SecurityContext
+}
+
+func (m *Modifier) updatePodSpec(pod *corev1.Pod, roleName, audience string, fsGroup *int64, regionalSTS bool, tokenExpiration int64) ([]patchOperation, bool) {
 	updateSettings := newPodUpdateSettings(m.AnnotationDomain, pod, regionalSTS)
 
 	tokenFilePath := filepath.Join(m.MountPath, m.tokenName)
@@ -313,6 +352,8 @@ func (m *Modifier) updatePodSpec(pod *corev1.Pod, roleName, audience string, reg
 		},
 	}
 
+	securityContext := m.addFSGroupToPod(pod, fsGroup)
+
 	patch := []patchOperation{}
 
 	// skip adding volume if it already exists
@@ -357,6 +398,16 @@ func (m *Modifier) updatePodSpec(pod *corev1.Pod, roleName, audience string, reg
 			Value: initContainers,
 		})
 	}
+
+	if securityContext != nil {
+		patch = append(patch, patchOperation{
+			Op:    "add",
+			Path:  "/spec/securityContext",
+			Value: securityContext,
+		})
+		changed = true
+	}
+
 	return patch, changed
 }
 
@@ -388,7 +439,7 @@ func (m *Modifier) MutatePod(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResp
 
 	pod.Namespace = req.Namespace
 
-	podRole, audience, regionalSTS, tokenExpiration := m.Cache.Get(pod.Spec.ServiceAccountName, pod.Namespace)
+	podRole, audience, fsGroup, regionalSTS, tokenExpiration := m.Cache.Get(pod.Spec.ServiceAccountName, pod.Namespace)
 
 	// determine whether to perform mutation
 	if podRole == "" {
@@ -403,7 +454,7 @@ func (m *Modifier) MutatePod(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResp
 		}
 	}
 
-	patch, changed := m.updatePodSpec(&pod, podRole, audience, regionalSTS, tokenExpiration)
+	patch, changed := m.updatePodSpec(&pod, podRole, audience, fsGroup, regionalSTS, tokenExpiration)
 	patchBytes, err := json.Marshal(patch)
 	if err != nil {
 		klog.Errorf("Error marshaling pod update: %v", err.Error())
