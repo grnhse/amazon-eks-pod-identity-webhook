@@ -268,7 +268,10 @@ func (m *Modifier) addFSGroupToPod(pod *corev1.Pod, saFSGroup *int64) *corev1.Po
 	// ServiceAccount `fs-group` annotation
 	fsGroupKey := fmt.Sprintf("%s/%s", m.AnnotationDomain, pkg.FSGroupAnnotation)
 	if fsgStr, ok := pod.Annotations[fsGroupKey]; ok {
-		if fsgInt, err := strconv.ParseInt(fsgStr, 10, 64); err == nil {
+		fsgInt, err := strconv.ParseInt(fsgStr, 10, 64)
+		if err != nil {
+			klog.V(4).Infof("Ignoring pod %s/%s invalid value for fs-group annotation", pod.Namespace, pod.Name)
+		} else {
 			fsGroup = &fsgInt
 		}
 	}

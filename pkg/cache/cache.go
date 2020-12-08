@@ -131,8 +131,12 @@ func (c *serviceAccountCache) addSA(sa *v1.ServiceAccount) {
 				resp.TokenExpiration = pkg.ValidateMinTokenExpiration(tokenExpiration)
 			}
 		}
-		if fsgStr, ok := sa.Annotations[c.annotationPrefix+"/fs-group"]; ok {
-			if fsgInt, err := strconv.ParseInt(fsgStr, 10, 64); err == nil {
+
+		if fsgStr, ok := sa.Annotations[c.annotationPrefix+"/"+pkg.FSGroupAnnotation]; ok {
+			fsgInt, err := strconv.ParseInt(fsgStr, 10, 64)
+			if err != nil {
+				klog.V(4).Infof("Ignoring service account %s/%s invalid value for fs-group annotation", sa.Namespace, sa.Name)
+			} else {
 				resp.FSGroup = &fsgInt
 			}
 		}
